@@ -22,6 +22,9 @@ from kokoro_onnx import Kokoro
 import pymupdf4llm
 import fitz
 
+import onnxruntime as rt
+rt.preload_dlls()
+
 warnings.filterwarnings("ignore", category=UserWarning, module='ebooklib')
 warnings.filterwarnings("ignore", category=FutureWarning, module='ebooklib')
 
@@ -35,12 +38,12 @@ def check_required_files(model_path="kokoro-v1.0.onnx", voices_path="voices-v1.0
         model_path: "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/kokoro-v1.0.onnx",
         voices_path: "https://github.com/nazdridoy/kokoro-tts/releases/download/v1.0.0/voices-v1.0.bin"
     }
-    
+
     missing_files = []
     for filepath, download_url in required_files.items():
         if not os.path.exists(filepath):
             missing_files.append((filepath, download_url))
-    
+
     if missing_files:
         print("Error: Required model files are missing:")
         for filepath, download_url in missing_files:
@@ -90,20 +93,20 @@ def chunk_text(text, initial_chunk_size=1000):
     current_chunk = []
     current_size = 0
     chunk_size = initial_chunk_size
-    
+
     for sentence in sentences:
         if not sentence.strip():
             continue  # Skip empty sentences
-        
+
         sentence = sentence.strip() + '.'
         sentence_size = len(sentence)
-        
+
         # If a single sentence is too long, split it into smaller pieces
         if sentence_size > chunk_size:
             words = sentence.split()
             current_piece = []
             current_piece_size = 0
-            
+
             for word in words:
                 word_size = len(word) + 1  # +1 for space
                 if current_piece_size + word_size > chunk_size:
@@ -114,23 +117,23 @@ def chunk_text(text, initial_chunk_size=1000):
                 else:
                     current_piece.append(word)
                     current_piece_size += word_size
-            
+
             if current_piece:
                 chunks.append(' '.join(current_piece).strip() + '.')
             continue
-        
+
         # Start new chunk if current one would be too large
         if current_size + sentence_size > chunk_size and current_chunk:
             chunks.append(' '.join(current_chunk))
             current_chunk = []
             current_size = 0
-        
+
         current_chunk.append(sentence)
         current_size += sentence_size
-    
+
     if current_chunk:
         chunks.append(' '.join(current_chunk))
-    
+
     return chunks
 
 def validate_language(lang, kokoro):
@@ -217,18 +220,18 @@ def print_supported_voices(model_path="kokoro-v1.0.onnx", voices_path="voices-v1
 
 def validate_voice(voice, kokoro):
     """Validate if the voice is supported and handle voice blending.
-    
+
     Format for blended voices: "voice1:weight,voice2:weight"
     Example: "af_sarah:60,am_adam:40" for 60-40 blend
     """
     try:
         supported_voices = set(kokoro.get_voices())
-        
+
         # Parse comma seperated voices for blend
         if ',' in voice:
             voices = []
             weights = []
-            
+
             # Parse voice:weight pairs
             for pair in voice.split(','):
                 if ':' in pair:
@@ -238,27 +241,27 @@ def validate_voice(voice, kokoro):
                 else:
                     voices.append(pair.strip())
                     weights.append(50.0)  # Default to 50% if no weight specified
-            
+
             if len(voices) != 2:
                 raise ValueError("voice blending needs two comma separated voices")
-                 
+
             # Validate voice
             for v in voices:
                 if v not in supported_voices:
                     supported_voices_list = ', '.join(sorted(supported_voices))
                     raise ValueError(f"Unsupported voice: {v}\nSupported voices are: {supported_voices_list}")
-             
+
             # Normalize weights to sum to 100
             total = sum(weights)
             if total != 100:
                 weights = [w * (100/total) for w in weights]
-            
+
             # Create voice blend style
             style1 = kokoro.get_voice_style(voices[0])
             style2 = kokoro.get_voice_style(voices[1])
             blend = np.add(style1 * (weights[0]/100), style2 * (weights[1]/100))
             return blend
-             
+
         # Single voice validation
         if voice not in supported_voices:
             supported_voices_list = ', '.join(sorted(supported_voices))
@@ -272,15 +275,15 @@ def extract_chapters_from_epub(epub_file, debug=False):
     """Extract chapters from epub file using ebooklib's metadata and TOC."""
     if not os.path.exists(epub_file):
         raise FileNotFoundError(f"EPUB file not found: {epub_file}")
-    
+
     book = epub.read_epub(epub_file)
     chapters = []
-    
+
     if debug:
         print("\nBook Metadata:")
         for key, value in book.metadata.items():
             print(f"  {key}: {value}")
-        
+
         print("\nTable of Contents:")
         def print_toc(items, depth=0):
             for item in items:
@@ -292,21 +295,21 @@ def extract_chapters_from_epub(epub_file, debug=False):
                 elif isinstance(item, epub.Link):
                     print(f"{indent}• {item.title} -> {item.href}")
         print_toc(book.toc)
-    
+
     def get_chapter_content(soup, start_id, next_id=None):
         """Extract content between two fragment IDs"""
         content = []
         start_elem = soup.find(id=start_id)
-        
+
         if not start_elem:
             return ""
-        
+
         # Skip the heading itself if it's a heading
         if start_elem.name in ['h1', 'h2', 'h3', 'h4']:
             current = start_elem.find_next_sibling()
         else:
             current = start_elem
-            
+
         while current:
             # Stop if we hit the next chapter
             if next_id and current.get('id') == next_id:
@@ -316,9 +319,9 @@ def extract_chapters_from_epub(epub_file, debug=False):
                 break
             content.append(current.get_text())
             current = current.find_next_sibling()
-            
+
         return '\n'.join(content).strip()
-    
+
     def process_toc_items(items, depth=0):
         processed = []
         for i, item in enumerate(items):
@@ -330,25 +333,25 @@ def extract_chapters_from_epub(epub_file, debug=False):
             elif isinstance(item, epub.Link):
                 if debug:
                     print(f"{'  ' * depth}Processing link: {item.title} -> {item.href}")
-                
+
                 # Skip if title suggests it's front matter
                 if (item.title.lower() in ['copy', 'copyright', 'title page', 'cover'] or
                     item.title.lower().startswith('by')):
                     continue
-                
+
                 # Extract the file name and fragment from href
                 href_parts = item.href.split('#')
                 file_name = href_parts[0]
                 fragment_id = href_parts[1] if len(href_parts) > 1 else None
-                
+
                 # Find the document
-                doc = next((doc for doc in book.get_items_of_type(ITEM_DOCUMENT) 
+                doc = next((doc for doc in book.get_items_of_type(ITEM_DOCUMENT)
                           if doc.file_name.endswith(file_name)), None)
-                
+
                 if doc:
                     content = doc.get_content().decode('utf-8')
                     soup = BeautifulSoup(content, "html.parser")
-                    
+
                     # If no fragment ID, get whole document content
                     if not fragment_id:
                         text_content = soup.get_text().strip()
@@ -360,10 +363,10 @@ def extract_chapters_from_epub(epub_file, debug=False):
                             next_href_parts = next_item.href.split('#')
                             if next_href_parts[0] == file_name and len(next_href_parts) > 1:
                                 next_fragment = next_href_parts[1]
-                        
+
                         # Extract content between fragments
                         text_content = get_chapter_content(soup, fragment_id, next_fragment)
-                    
+
                     if text_content:
                         chapters.append({
                             'title': item.title,
@@ -376,40 +379,40 @@ def extract_chapters_from_epub(epub_file, debug=False):
                             print(f"{'  ' * depth}Content length: {len(text_content)} chars")
                             print(f"{'  ' * depth}Word count: {len(text_content.split())}")
         return processed
-    
+
     # Process the table of contents
     process_toc_items(book.toc)
-    
+
     # If no chapters were found through TOC, try processing all documents
     if not chapters:
         if debug:
             print("\nNo chapters found in TOC, processing all documents...")
-        
+
         # Get all document items sorted by file name
         docs = sorted(
             book.get_items_of_type(ITEM_DOCUMENT),
             key=lambda x: x.file_name
         )
-        
+
         for doc in docs:
             if debug:
                 print(f"Processing document: {doc.file_name}")
-            
+
             content = doc.get_content().decode('utf-8')
             soup = BeautifulSoup(content, "html.parser")
-            
+
             # Try to find chapter divisions
             chapter_divs = soup.find_all(['h1', 'h2', 'h3'], class_=lambda x: x and 'chapter' in x.lower())
             if not chapter_divs:
-                chapter_divs = soup.find_all(lambda tag: tag.name in ['h1', 'h2', 'h3'] and 
+                chapter_divs = soup.find_all(lambda tag: tag.name in ['h1', 'h2', 'h3'] and
                                           ('chapter' in tag.get_text().lower() or
                                            'book' in tag.get_text().lower()))
-            
+
             if chapter_divs:
                 # Process each chapter division
                 for i, div in enumerate(chapter_divs):
                     title = div.get_text().strip()
-                    
+
                     # Get content until next chapter heading or end
                     content = ''
                     for tag in div.find_next_siblings():
@@ -418,7 +421,7 @@ def extract_chapters_from_epub(epub_file, debug=False):
                             'book' in tag.get_text().lower()):
                             break
                         content += tag.get_text() + '\n'
-                    
+
                     if content.strip():
                         chapters.append({
                             'title': title,
@@ -434,7 +437,7 @@ def extract_chapters_from_epub(epub_file, debug=False):
                     # Try to find a title
                     title_tag = soup.find(['h1', 'h2', 'title'])
                     title = title_tag.get_text().strip() if title_tag else f"Chapter {len(chapters) + 1}"
-                    
+
                     if title.lower() not in ['copy', 'copyright', 'title page', 'cover']:
                         chapters.append({
                             'title': title,
@@ -443,19 +446,19 @@ def extract_chapters_from_epub(epub_file, debug=False):
                         })
                         if debug:
                             print(f"Added chapter: {title}")
-    
+
     # Print summary
     if chapters:
         print("\nSuccessfully extracted {} chapters:".format(len(chapters)))
         for chapter in chapters:
             print(f"  {chapter['order']}. {chapter['title']}")
-        
+
         total_words = sum(len(chapter['content'].split()) for chapter in chapters)
         print("\nBook Summary:")
         print(f"Total Chapters: {len(chapters)}")
         print(f"Total Words: {total_words:,}")
         print(f"Total Duration: {total_words / 150:.1f} minutes")
-        
+
         if debug:
             print("\nDetailed Chapter List:")
             for chapter in chapters:
@@ -469,19 +472,19 @@ def extract_chapters_from_epub(epub_file, debug=False):
             print("\nAvailable documents:")
             for doc in book.get_items_of_type(ITEM_DOCUMENT):
                 print(f"  • {doc.file_name}")
-    
+
     return chapters
 
 class PdfParser:
     """Parser for extracting chapters from PDF files.
-    
+
     Attempts to extract chapters first from table of contents,
     then falls back to markdown-based extraction if TOC fails.
     """
-    
+
     def __init__(self, pdf_path: str, debug: bool = False, min_chapter_length: int = 50):
         """Initialize PDF parser.
-        
+
         Args:
             pdf_path: Path to PDF file
             debug: Enable debug logging
@@ -491,13 +494,13 @@ class PdfParser:
         self.chapters = []
         self.debug = debug
         self.min_chapter_length = min_chapter_length
-        
+
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
     def get_chapters(self):
         """Extract chapters from PDF file.
-        
+
         Returns:
             List of chapter dictionaries with title, content and order.
         """
@@ -505,28 +508,28 @@ class PdfParser:
             print("\nDEBUG: Starting chapter extraction...")
             print(f"DEBUG: PDF file: {self.pdf_path}")
             print(f"DEBUG: Min chapter length: {self.min_chapter_length}")
-        
+
         # Try TOC extraction first
         if self.get_chapters_from_toc():
             if self.debug:
                 print(f"\nDEBUG: Successfully extracted {len(self.chapters)} chapters from TOC")
             return self.chapters
-            
+
         # Fall back to markdown extraction
         if self.debug:
             print("\nDEBUG: TOC extraction failed, trying markdown conversion...")
-        
+
         self.chapters = self.get_chapters_from_markdown()
-        
+
         if self.debug:
             print(f"\nDEBUG: Markdown extraction complete")
             print(f"DEBUG: Found {len(self.chapters)} chapters")
-            
+
         return self.chapters
 
     def get_chapters_from_toc(self):
         """Extract chapters using PDF table of contents.
-        
+
         Returns:
             bool: True if chapters were found, False otherwise
         """
@@ -534,7 +537,7 @@ class PdfParser:
         try:
             doc = fitz.open(self.pdf_path)
             toc = doc.get_toc()
-            
+
             if not toc:
                 if self.debug:
                     print("\nDEBUG: No table of contents found")
@@ -546,18 +549,18 @@ class PdfParser:
                 title = self._clean_title(title)
                 indent = "  " * (level - 1)
                 print(f"{indent}{'•' if level > 1 else '>'} {title} (page {page})")
-            
+
             if self.debug:
                 print(f"\nDEBUG: Found {len(toc)} TOC entries")
-            
+
             # Get user confirmation
             print("\nPress Enter to start processing, or Ctrl+C to cancel...")
             input()
-            
+
             # Extract level 1 chapters, filtering out empty titles and duplicates
             seen_pages = set()
             chapter_markers = []
-            
+
             for level, title, page in toc:
                 if level == 1:
                     title = self._clean_title(title)
@@ -565,32 +568,32 @@ class PdfParser:
                     if title and page not in seen_pages:
                         chapter_markers.append((title, page))
                         seen_pages.add(page)
-            
+
             if not chapter_markers:
                 if self.debug:
                     print("\nDEBUG: No level 1 chapters found in TOC")
                 return False
-            
+
             if self.debug:
                 print(f"\nDEBUG: Found {len(chapter_markers)} chapters:")
                 for title, page in chapter_markers:
                     print(f"DEBUG: • {title} (page {page})")
-            
+
             # Process each chapter
             for i, (title, start_page) in enumerate(chapter_markers):
                 if self.debug:
                     print(f"\nDEBUG: Processing chapter {i+1}/{len(chapter_markers)}")
                     print(f"DEBUG: Title: {title}")
                     print(f"DEBUG: Start page: {start_page}")
-                
+
                 # Get chapter end page
-                end_page = (chapter_markers[i + 1][1] - 1 
-                           if i < len(chapter_markers) - 1 
+                end_page = (chapter_markers[i + 1][1] - 1
+                           if i < len(chapter_markers) - 1
                            else doc.page_count)
-                
+
                 # Extract chapter text
                 chapter_text = self._extract_chapter_text(doc, start_page - 1, end_page)
-                
+
                 if len(chapter_text.strip()) > self.min_chapter_length:
                     self.chapters.append({
                         'title': title,
@@ -599,21 +602,21 @@ class PdfParser:
                     })
                     if self.debug:
                         print(f"DEBUG: Added chapter with {len(chapter_text.split())} words")
-            
+
             return bool(self.chapters)
-            
+
         except Exception as e:
             if self.debug:
                 print(f"\nDEBUG: Error in TOC extraction: {str(e)}")
             return False
-            
+
         finally:
             if doc:
                 doc.close()
 
     def get_chapters_from_markdown(self):
         """Extract chapters by converting PDF to markdown.
-        
+
         Returns:
             List of chapter dictionaries
         """
@@ -622,22 +625,22 @@ class PdfParser:
             def progress(current, total):
                 if self.debug:
                     print(f"\rConverting page {current}/{total}...", end="", flush=True)
-            
+
             # Convert PDF to markdown
             md_text = pymupdf4llm.to_markdown(
                 self.pdf_path,
                 show_progress=True,
                 progress_callback=progress
             )
-            
+
             # Clean up markdown text
             md_text = self._clean_markdown(md_text)
-            
+
             # Extract chapters
             current_chapter = None
             current_text = []
             chapter_count = 0
-            
+
             for line in md_text.split('\n'):
                 if line.startswith('#'):
                     # Save previous chapter if exists
@@ -649,7 +652,7 @@ class PdfParser:
                                 'content': chapter_text,
                                 'order': chapter_count
                             })
-                    
+
                     # Start new chapter
                     chapter_count += 1
                     current_chapter = f"Chapter {chapter_count}_{line.lstrip('#').strip()}"
@@ -657,7 +660,7 @@ class PdfParser:
                 else:
                     if current_chapter is not None:
                         current_text.append(line + '\n')
-            
+
             # Add final chapter
             if current_chapter and current_text:
                 chapter_text = ''.join(current_text)
@@ -667,9 +670,9 @@ class PdfParser:
                         'content': chapter_text,
                         'order': chapter_count
                     })
-            
+
             return chapters
-            
+
         except Exception as e:
             if self.debug:
                 print(f"\nDEBUG: Error in markdown extraction: {str(e)}")
@@ -678,7 +681,7 @@ class PdfParser:
     def _clean_title(self, title: str) -> str:
         """Clean up chapter title text."""
         return title.strip().replace('\u200b', ' ')
-        
+
     def _clean_markdown(self, text: str) -> str:
         """Clean up converted markdown text."""
         # Remove page markers
@@ -686,7 +689,7 @@ class PdfParser:
         # Remove other unwanted characters
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
-        
+
     def _extract_chapter_text(self, doc, start_page: int, end_page: int) -> str:
         """Extract text from PDF pages."""
         chapter_text = []
@@ -699,10 +702,10 @@ class PdfParser:
                 if self.debug:
                     print(f"\nDEBUG: Error extracting page {page_num}: {str(e)}")
                 continue
-                
+
         return '\n'.join(chapter_text)
 
-def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: float, lang: str, 
+def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: float, lang: str,
                            retry_count=0, debug=False) -> tuple[list[float] | None, int | None]:
     """Process a single chunk of text sequentially with automatic chunk size adjustment."""
     try:
@@ -713,7 +716,7 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: floa
                 sys.stdout.write(f"\nDEBUG: Retry #{retry_count} - Reduced chunk size to {len(chunk)}")
             sys.stdout.write("\n")  # Move back to progress line
             sys.stdout.flush()
-        
+
         samples, sample_rate = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
         return samples, sample_rate
     except Exception as e:
@@ -721,7 +724,7 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: floa
         if "index 510 is out of bounds" in error_msg:
             current_size = len(chunk)
             new_size = int(current_size * 0.6)  # Reduce by 40% to converge faster
-            
+
             if debug:
                 sys.stdout.write("\033[K")  # Clear to end of line
                 sys.stdout.write(f"\nDEBUG: Phoneme length error detected on chunk size {current_size}")
@@ -733,13 +736,13 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: floa
                 sys.stdout.write("\rNote: Automatically handling a long text segment...")
                 sys.stdout.write("\n")
             sys.stdout.flush()
-            
+
             # Split this chunk into smaller pieces
             words = chunk.split()
             current_piece = []
             current_size = 0
             pieces = []
-            
+
             for word in words:
                 word_size = len(word) + 1  # +1 for space
                 if current_size + word_size > new_size:
@@ -750,10 +753,10 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: floa
                 else:
                     current_piece.append(word)
                     current_size += word_size
-            
+
             if current_piece:
                 pieces.append(' '.join(current_piece).strip())
-            
+
             if debug:
                 sys.stdout.write("\033[K")
                 sys.stdout.write(f"\nDEBUG: Split chunk into {len(pieces)} pieces")
@@ -761,24 +764,24 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: floa
                     sys.stdout.write(f"\nDEBUG: Piece {i} length: {len(piece)}")
                 sys.stdout.write("\n")
                 sys.stdout.flush()
-            
+
             # Process each piece
             all_samples = []
             last_sample_rate = None
-            
+
             for i, piece in enumerate(pieces, 1):
                 if debug:
                     sys.stdout.write("\033[K")
                     sys.stdout.write(f"\nDEBUG: Processing piece {i}/{len(pieces)}")
                     sys.stdout.write("\n")
                     sys.stdout.flush()
-                
-                samples, sr = process_chunk_sequential(piece, kokoro, voice, speed, lang, 
+
+                samples, sr = process_chunk_sequential(piece, kokoro, voice, speed, lang,
                                                      retry_count + 1, debug)
                 if samples is not None:
                     all_samples.extend(samples)
                     last_sample_rate = sr
-            
+
             if all_samples:
                 if debug:
                     sys.stdout.write("\033[K")
@@ -786,13 +789,13 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: floa
                     sys.stdout.write("\n")
                 sys.stdout.flush()
                 return all_samples, last_sample_rate
-            
+
             if debug:
                 sys.stdout.write("\033[K")
                 sys.stdout.write(f"\nDEBUG: Failed to process any pieces after splitting")
                 sys.stdout.write("\n")
             sys.stdout.flush()
-            
+
         # Show a more user-friendly error message in non-debug mode
         if not debug:
             sys.stdout.write("\033[K")
@@ -804,28 +807,28 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: floa
             sys.stdout.write(f"\nDEBUG: Chunk length: {len(chunk)}")
         sys.stdout.write("\n")
         sys.stdout.flush()
-        
+
         return None, None
 
-def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, lang="en-us", 
+def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, lang="en-us",
                          stream=False, split_output=None, format="wav", debug=False, stdin_indicators=None,
                          model_path="kokoro-v1.0.onnx", voices_path="voices-v1.0.bin"):
     global stop_spinner
-    
+
     # Define stdin indicators if not provided
     if stdin_indicators is None:
         stdin_indicators = ['/dev/stdin', '-', 'CONIN$']  # CONIN$ is Windows stdin
-    
+
     # Check for required files first
     check_required_files(model_path, voices_path)
-    
+
     # Load Kokoro model
     try:
         kokoro = Kokoro(model_path, voices_path)
 
         # Validate language after loading model
         lang = validate_language(lang, kokoro)
-        
+
         # Handle voice selection
         if voice:
             voice = validate_voice(voice, kokoro)
@@ -883,26 +886,26 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
     except Exception as e:
         print(f"Error loading Kokoro model: {e}")
         sys.exit(1)
-    
+
     # Read the input file (handle .txt or .epub)
     if input_file.endswith('.epub'):
         chapters = extract_chapters_from_epub(input_file, debug)
         if not chapters:
             print("No chapters found in EPUB file.")
             sys.exit(1)
-            
+
             print("\nPress Enter to start processing, or Ctrl+C to cancel...")
             input()
-            
+
             if split_output:
                 os.makedirs(split_output, exist_ok=True)
-                
+
                 # First create all chapter directories and info files
                 print("\nCreating chapter directories and info files...")
                 for chapter_num, chapter in enumerate(chapters, 1):
                     chapter_dir = os.path.join(split_output, f"chapter_{chapter_num:03d}")
                     os.makedirs(chapter_dir, exist_ok=True)
-                    
+
                     # Write chapter info with more details
                     info_file = os.path.join(chapter_dir, "info.txt")
                     with open(info_file, "w", encoding="utf-8") as f:
@@ -910,9 +913,9 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
                         f.write(f"Order: {chapter['order']}\n")
                         f.write(f"Words: {len(chapter['content'].split())}\n")
                         f.write(f"Estimated Duration: {len(chapter['content'].split()) / 150:.1f} minutes\n")
-                
+
                 print("Created chapter directories and info files")
-                
+
                 # Continue with existing processing code...
     elif input_file.endswith('.pdf'):
         parser = PdfParser(input_file, debug=debug)
@@ -937,19 +940,19 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
     else:
         if split_output:
             os.makedirs(split_output, exist_ok=True)
-            
+
             for chapter_num, chapter in enumerate(chapters, 1):
                 chapter_dir = os.path.join(split_output, f"chapter_{chapter_num:03d}")
-                
+
                 # Skip if chapter is already fully processed
                 if os.path.exists(chapter_dir):
                     info_file = os.path.join(chapter_dir, "info.txt")
                     if os.path.exists(info_file):
                         chunks = chunk_text(chapter['content'], initial_chunk_size=1000)
                         total_chunks = len(chunks)
-                        existing_chunks = len([f for f in os.listdir(chapter_dir) 
+                        existing_chunks = len([f for f in os.listdir(chapter_dir)
                                             if f.startswith("chunk_") and f.endswith(f".{format}")])
-                        
+
                         if existing_chunks == total_chunks:
                             print(f"\nSkipping {chapter['title']}: Already completed ({existing_chunks} chunks)")
                             continue
@@ -958,42 +961,42 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
 
                 print(f"\nProcessing: {chapter['title']}")
                 os.makedirs(chapter_dir, exist_ok=True)
-                
+
                 # Write chapter info if not exists
                 info_file = os.path.join(chapter_dir, "info.txt")
                 if not os.path.exists(info_file):
                     with open(info_file, "w", encoding="utf-8") as f:
                         f.write(f"Title: {chapter['title']}\n")
-                
+
                 chunks = chunk_text(chapter['content'], initial_chunk_size=1000)
                 total_chunks = len(chunks)
-                processed_chunks = len([f for f in os.listdir(chapter_dir) 
+                processed_chunks = len([f for f in os.listdir(chapter_dir)
                                      if f.startswith("chunk_") and f.endswith(f".{format}")])
-                
+
                 for chunk_num, chunk in enumerate(chunks, 1):
                     if stop_audio:  # Check for interruption
                         break
-                    
+
                     # Skip if chunk file already exists (regardless of position)
                     chunk_file = os.path.join(chapter_dir, f"chunk_{chunk_num:03d}.{format}")
                     if os.path.exists(chunk_file):
                         continue  # Don't increment processed_chunks here since we counted them above
-                    
+
                     # Create progress bar
                     filled = "■" * processed_chunks
                     remaining = "□" * (total_chunks - processed_chunks)
                     progress_bar = f"[{filled}{remaining}] ({processed_chunks}/{total_chunks})"
-                    
+
                     stop_spinner = False
                     spinner_thread = threading.Thread(
                         target=spinning_wheel,
                         args=(f"Processing {chapter['title']}", progress_bar)
                     )
                     spinner_thread.start()
-                    
+
                     try:
                         samples, sample_rate = process_chunk_sequential(
-                            chunk, kokoro, voice, speed, lang, 
+                            chunk, kokoro, voice, speed, lang,
                             retry_count=0, debug=debug  # Add retry parameters
                         )
                         if samples is not None:
@@ -1001,41 +1004,41 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
                             processed_chunks += 1
                     except Exception as e:
                         print(f"\nError processing chunk {chunk_num}: {e}")
-                    
+
                     stop_spinner = True
                     spinner_thread.join()
-                    
+
                     if stop_audio:  # Check for interruption
                         break
-                
+
                 print(f"\nCompleted {chapter['title']}: {processed_chunks}/{total_chunks} chunks processed")
-                
+
                 if stop_audio:  # Check for interruption
                     break
-            
+
             print(f"\nCreated audio files for {len(chapters)} chapters in {split_output}/")
         else:
             # Combine all chapters into one file
             all_samples = []
             sample_rate = None
-            
+
             for chapter_num, chapter in enumerate(chapters, 1):
                 print(f"\nProcessing: {chapter['title']}")
                 chunks = chunk_text(chapter['content'], initial_chunk_size=1000)
                 processed_chunks = 0
                 total_chunks = len(chunks)
-                
+
                 for chunk_num, chunk in enumerate(chunks, 1):
                     if stop_audio:  # Check for interruption
                         break
-                    
+
                     stop_spinner = False
                     spinner_thread = threading.Thread(
                         target=spinning_wheel,
                         args=(f"Processing chunk {chunk_num}/{total_chunks}",)
                     )
                     spinner_thread.start()
-                    
+
                     try:
                         samples, sr = process_chunk_sequential(
                             chunk, kokoro, voice, speed, lang,
@@ -1048,12 +1051,12 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
                             processed_chunks += 1
                     except Exception as e:
                         print(f"\nError processing chunk {chunk_num}: {e}")
-                    
+
                     stop_spinner = True
                     spinner_thread.join()
-                
+
                 print(f"\nCompleted {chapter['title']}: {processed_chunks}/{total_chunks} chunks processed")
-            
+
             if all_samples:
                 print("\nSaving complete audio file...")
                 if not output_file:
@@ -1065,21 +1068,21 @@ async def stream_audio(kokoro, text, voice, speed, lang, debug=False):
     global stop_spinner, stop_audio
     stop_spinner = False
     stop_audio = False
-    
+
     print("Starting audio stream...")
     chunks = chunk_text(text, initial_chunk_size=1000)
-    
+
     for i, chunk in enumerate(chunks, 1):
         if stop_audio:
             break
         # Update progress percentage
         progress = int((i / len(chunks)) * 100)
         spinner_thread = threading.Thread(
-            target=spinning_wheel, 
+            target=spinning_wheel,
             args=(f"Streaming chunk {i}/{len(chunks)}",)
         )
         spinner_thread.start()
-        
+
         async for samples, sample_rate in kokoro.create_stream(
             chunk, voice=voice, speed=speed, lang=lang
         ):
@@ -1089,11 +1092,11 @@ async def stream_audio(kokoro, text, voice, speed, lang, debug=False):
                 print(f"\nDEBUG: Playing chunk of {len(samples)} samples")
             sd.play(samples, sample_rate)
             sd.wait()
-        
+
         stop_spinner = True
         spinner_thread.join()
         stop_spinner = False
-    
+
     print("\nStreaming completed.")
 
 def handle_ctrl_c(signum, frame):
@@ -1115,7 +1118,7 @@ def merge_chunks_to_chapters(split_output_dir, format="wav"):
         return
 
     # Find all chapter directories
-    chapter_dirs = sorted([d for d in os.listdir(split_output_dir) 
+    chapter_dirs = sorted([d for d in os.listdir(split_output_dir)
                           if d.startswith("chapter_") and os.path.isdir(os.path.join(split_output_dir, d))])
 
     if not chapter_dirs:
@@ -1127,9 +1130,9 @@ def merge_chunks_to_chapters(split_output_dir, format="wav"):
 
     for chapter_dir in chapter_dirs:
         chapter_path = os.path.join(split_output_dir, chapter_dir)
-        chunk_files = sorted([f for f in os.listdir(chapter_path) 
+        chunk_files = sorted([f for f in os.listdir(chapter_path)
                             if f.startswith("chunk_") and f.endswith(f".{format}")])
-        
+
         if not chunk_files:
             print(f"No chunks found in {chapter_dir}")
             continue
@@ -1146,7 +1149,7 @@ def merge_chunks_to_chapters(split_output_dir, format="wav"):
 
         # Clean title for filesystem use
         safe_title = "".join(c for c in chapter_title if c.isalnum() or c in (' ', '-', '_')).strip()
-        
+
         # Handle duplicate or empty titles
         if not safe_title or safe_title in used_titles:
             merged_file = os.path.join(split_output_dir, f"{chapter_dir}.{format}")
@@ -1155,63 +1158,63 @@ def merge_chunks_to_chapters(split_output_dir, format="wav"):
             used_titles.add(safe_title)
 
         print(f"\nMerging chunks for {chapter_title}")
-        
+
         # Initialize variables for merging
         all_samples = []
         sample_rate = None
         total_duration = 0
-        
+
         # Create progress spinner
         total_chunks = len(chunk_files)
         processed_chunks = 0
-        
+
         for chunk_file in chunk_files:
             chunk_path = os.path.join(chapter_path, chunk_file)
-            
+
             # Display progress
             print(f"\rProcessing chunk {processed_chunks + 1}/{total_chunks}", end="")
-            
+
             try:
                 # Read audio data
                 data, sr = sf.read(chunk_path)
-                
+
                 # Verify the audio data
                 if len(data) == 0:
                     print(f"\nWarning: Empty audio data in {chunk_file}")
                     continue
-                
+
                 # Initialize sample rate or verify it matches
                 if sample_rate is None:
                     sample_rate = sr
                 elif sr != sample_rate:
                     print(f"\nWarning: Sample rate mismatch in {chunk_file}")
                     continue
-                
+
                 # Add chunk duration to total
                 chunk_duration = len(data) / sr
                 total_duration += chunk_duration
-                
+
                 # Append the audio data
                 all_samples.extend(data)
                 processed_chunks += 1
-                
+
             except Exception as e:
                 print(f"\nError processing {chunk_file}: {e}")
-        
+
         print()  # New line after progress
-        
+
         if all_samples:
             print(f"Saving merged chapter to {merged_file}")
             print(f"Total duration: {total_duration:.2f} seconds")
-            
+
             try:
                 # Ensure all_samples is a numpy array
                 all_samples = np.array(all_samples)
-                
+
                 # Save merged audio
                 sf.write(merged_file, all_samples, sample_rate)
                 print(f"Successfully merged {processed_chunks}/{total_chunks} chunks")
-                
+
                 # Verify the output file
                 if os.path.exists(merged_file):
                     output_data, output_sr = sf.read(merged_file)
@@ -1219,7 +1222,7 @@ def merge_chunks_to_chapters(split_output_dir, format="wav"):
                     print(f"Verified output file: {output_duration:.2f} seconds")
                 else:
                     print("Warning: Output file was not created")
-                
+
             except Exception as e:
                 print(f"Error saving merged file: {e}")
         else:
@@ -1250,10 +1253,10 @@ def main():
     """Main entry point for the kokoro-tts CLI tool."""
     # Define stdin indicators once (cross-platform)
     stdin_indicators = ['/dev/stdin', '-', 'CONIN$']  # CONIN$ is Windows stdin
-    
+
     # Validate command line arguments
     valid_options = get_valid_options()
-    
+
     # Check for unknown options
     unknown_options = []
     i = 0
@@ -1265,7 +1268,7 @@ def main():
         elif arg in {'--speed', '--lang', '--voice', '--split-output', '--format', '--model', '--voices'}:
             i += 1
         i += 1
-    
+
     # If unknown options were found, show error and help
     if unknown_options:
         print("Error: Unknown option(s):", ", ".join(unknown_options))
@@ -1278,7 +1281,7 @@ def main():
         print("\n")  # Add extra newline for spacing
         print_usage()  # Show the full help text
         sys.exit(1)
-    
+
     # Handle help commands first (before argument parsing)
     if '--help' in sys.argv or '-h' in sys.argv:
         print_usage()
@@ -1287,31 +1290,31 @@ def main():
         # For help commands, we need to parse model/voices paths first
         model_path = "kokoro-v1.0.onnx"  # default model path
         voices_path = "voices-v1.0.bin"  # default voices path
-        
+
         # Parse model/voices paths for help commands
         for i, arg in enumerate(sys.argv):
             if arg == '--model' and i + 1 < len(sys.argv):
                 model_path = sys.argv[i + 1]
             elif arg == '--voices' and i + 1 < len(sys.argv):
                 voices_path = sys.argv[i + 1]
-        
+
         print_supported_languages(model_path, voices_path)
         sys.exit(0)
     elif '--help-voices' in sys.argv:
         # For help commands, we need to parse model/voices paths first
         model_path = "kokoro-v1.0.onnx"  # default model path
         voices_path = "voices-v1.0.bin"  # default voices path
-        
+
         # Parse model/voices paths for help commands
         for i, arg in enumerate(sys.argv):
             if arg == '--model' and i + 1 < len(sys.argv):
                 model_path = sys.argv[i + 1]
             elif arg == '--voices' and i + 1 < len(sys.argv):
                 voices_path = sys.argv[i + 1]
-        
+
         print_supported_voices(model_path, voices_path)
         sys.exit(0)
-    
+
     # Parse arguments
     input_file = None
     if len(sys.argv) > 1 and not sys.argv[1].startswith('--'):
@@ -1329,7 +1332,7 @@ def main():
     merge_chunks = '--merge-chunks' in sys.argv
     model_path = "kokoro-v1.0.onnx"  # default model path
     voices_path = "voices-v1.0.bin"  # default voices path
-    
+
     # Parse optional arguments
     for i, arg in enumerate(sys.argv):
         if arg == '--speed' and i + 1 < len(sys.argv):
@@ -1353,7 +1356,7 @@ def main():
             model_path = sys.argv[i + 1]
         elif arg == '--voices' and i + 1 < len(sys.argv):
             voices_path = sys.argv[i + 1]
-    
+
     # Handle merge chunks operation
     if merge_chunks:
         if not split_output:
@@ -1361,7 +1364,7 @@ def main():
             sys.exit(1)
         merge_chunks_to_chapters(split_output, format)
         sys.exit(0)
-    
+
     # Normal processing mode
     if not input_file:
         print("Error: Input file required for text-to-speech conversion")
@@ -1372,18 +1375,18 @@ def main():
     if input_file not in stdin_indicators and not os.access(input_file, os.R_OK):
         print(f"Error: Cannot read from {input_file}. File may not exist or you may not have permission to read it.")
         sys.exit(1)
-    
+
     # Ensure the output file has a proper extension if specified
     if output_file and not output_file.endswith(('.' + format)):
         print(f"Error: Output file must have .{format} extension.")
         sys.exit(1)
-    
+
     # Add debug flag
     debug = '--debug' in sys.argv
-    
+
     # Convert text to audio with debug flag
-    convert_text_to_audio(input_file, output_file, voice=voice, stream=stream, 
-                         speed=speed, lang=lang, split_output=split_output, 
+    convert_text_to_audio(input_file, output_file, voice=voice, stream=stream,
+                         speed=speed, lang=lang, split_output=split_output,
                          format=format, debug=debug, stdin_indicators=stdin_indicators,
                          model_path=model_path, voices_path=voices_path)
 

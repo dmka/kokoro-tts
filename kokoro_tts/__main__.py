@@ -8,6 +8,4 @@ This allows users to run: python -m kokoro_tts
 from . import main
 
 if __name__ == "__main__":
-    import onnxruntime as rt
-    rt.preload_dlls()
     main()
